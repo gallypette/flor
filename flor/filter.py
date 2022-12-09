@@ -2,8 +2,11 @@
 # Copyright (c) 2016, 2017, DCSO GmbH. All rights reserved.
 
 import math
+import pickle
 from struct import unpack, pack
 from .fnv import fnv_1
+from roaringbitmap import (RoaringBitmap)
+import pdb
 
 m = 18446744073709551557
 g = 18446744073709550147
@@ -18,10 +21,11 @@ class BloomFilter(object):
         self.n = n
         self.N = 0
         self.m = int(abs(math.ceil(float(n) * math.log(float(p)) / math.pow(math.log(2.0), 2.0))))
-        #we work in 64 bit blocks as this is the format of the Go filter.
-        self.M = int(math.ceil(float(self.m) / 64.0))*8
+        # M repurposed
+        self.M = 0
         self.k = int(math.ceil(math.log(2) * float(self.m) / float(n)))
-        self._bytes = bytearray([0 for i in range(self.M)])
+        # self._bytes = bytearray([0 for i in range(self.M)])
+        self._bytes = RoaringBitmap()
         self.data = data
 
     def __contains__(self, value):
@@ -62,46 +66,53 @@ class BloomFilter(object):
             raise IOError("Invalid filter!")
         self.N = unpack('<Q', bs8)[0]
 
-        self.M = int(math.ceil(self.m/64.0))*8
+        bs8 = input_file.read(8)
+        if len(bs8) != 8:
+            raise IOError("Invalid filter!")
+        self.M = unpack('<Q', bs8)[0]
 
-        self._bytes = bytearray(input_file.read(self.M))
-        if len(self._bytes) != self.M:
-            raise IOError("Mismatched number of bytes: Expected {}, got {}.".format(self.M,len(self._bytes)))
+        self._bytes = pickle.loads(input_file.read(self.M))
 
         # we read any data that might be attached to the file
         self.data = input_file.read()
 
     def write(self, output_file):
+        p = pickle.dumps(self._bytes)
+        self.M = len(p)
         output_file.write(pack('<Q', 1))
         output_file.write(pack('<Q', self.n))
         output_file.write(pack('<d', self.p))
         output_file.write(pack('<Q', self.k))
         output_file.write(pack('<Q', self.m))
         output_file.write(pack('<Q', self.N))
-        output_file.write(bytes(self._bytes))
+        output_file.write(pack('<Q', self.M))
+        output_file.write(p)
         output_file.write(bytes(self.data))
 
     def add(self, value):
         fp = self.fingerprint(value)
         new_value = False
         for fpe in fp:
-            k = int(fpe / 8)
-            l = fpe % 8
-            v = 1 << l
-            if self._bytes[k] & v == 0:
+            try:
+                if self._bytes.index(fpe) != None: 
+                    break
+            except IndexError: 
                 new_value = True
-            self._bytes[k] |= v
         if new_value:
-            self.N+=1
-            if self.N >= self.n:
+            if (self.N+1) >= self.n:
                 raise BloomFilter.CapacityError("Bloom filter is full!")
+            else:
+                self.N+=1
+                for fpe in fp:
+                    self._bytes.add(fpe)
 
     def check(self, value):
         fp = self.fingerprint(value)
         for fpe in fp:
-            k = int(fpe / 8)
-            l = fpe % 8
-            if self._bytes[k] & (1 << l) == 0:
+            try:
+                if self._bytes.index(fpe) != None :
+                    continue
+            except IndexError:
                 return False
         return True
 
